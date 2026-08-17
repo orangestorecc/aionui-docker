@@ -86,9 +86,11 @@ RUN npm install -g @anthropic-ai/claude-code @openai/codex || true
 
 # O AionUi invoca o Claude Code com --dangerously-skip-permissions, e o Claude
 # recusa essa flag como root ("cannot be used with root/sudo privileges for
-# security reasons") — o agente morria na hora com exit code 1. Daí o usuário
+# security reasons") — o agente morria na hora com exit code 1. Daí rodar
 # não-root. Vale como boa prática de qualquer forma: é um agente com shell.
-RUN useradd -m -u 1000 -s /bin/bash aion
+#
+# Usamos o usuário `node`, que a imagem base já traz no uid 1000 (criar outro
+# ali falha com exit code 4, uid em uso).
 
 # HOME dentro do volume: o `claude` grava credencial em $HOME/.claude e o `codex`
 # em $HOME/.codex. Com o HOME padrão (/root, dentro da camada do container) o
@@ -103,8 +105,8 @@ RUN printf '%s\n' \
       '#!/bin/sh' \
       'set -e' \
       'mkdir -p /data/home /data/logs' \
-      'chown -R aion:aion /data 2>/dev/null || true' \
-      'exec gosu aion "$@"' \
+      'chown -R node:node /data 2>/dev/null || true' \
+      'exec gosu node "$@"' \
     > /usr/local/bin/entrypoint.sh \
     && chmod +x /usr/local/bin/entrypoint.sh
 
