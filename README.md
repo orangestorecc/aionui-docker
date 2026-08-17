@@ -30,8 +30,10 @@ O GitHub Actions publica automaticamente: a cada push no `Dockerfile`, todo dia 
 — onde dá para fixar `aionui_ref` e `aioncore_version`.
 
 O build **não roda no servidor da N49** de propósito: são ~3200 pacotes e um bundle
-de ~10.300 módulos, com pico acima de 3 GB de heap. Naquela máquina, que também
-serve produção, o kernel matava o processo por falta de memória.
+de ~10.300 módulos, com pico acima de 3 GB de heap. Lá o processo morria com
+SIGKILL — não por falta de RAM no host (tem ~12 GB), mas por limite do container
+de build. Somando a isso não disputar CPU com produção e o deploy virar um
+`docker pull` de segundos, buildar fora é a escolha certa de qualquer forma.
 
 As duas versões andam em par — o commit que sobe o AionUi para 2.1.57 sobe o
 aioncore para v0.1.68 — e o workflow resolve as duas juntas para não dessincronizar.

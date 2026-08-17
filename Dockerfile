@@ -63,10 +63,10 @@ RUN head -3 /proc/meminfo && echo "nproc=$(nproc)"
 # morre com "Reached heap limit". O NODE_OPTIONS fica escopado neste RUN de
 # propósito — em runtime não queremos reservar heap à toa.
 #
-# Calibragem, medida no servidor da N49 (máquina pequena, compartilhada com
-# produção): 2048 (padrão do V8) estoura com "Reached heap limit"; 4096 fez o
-# kernel matar o processo com SIGKILL — morte seca, sem stack trace.
-# No runner do GitHub Actions (16 GB) sobra folga, daí o default de 6144.
+# Calibragem: 2048 (padrão do V8) estoura com "Reached heap limit". No servidor
+# da N49, 4096 morria com SIGKILL (morte seca, sem stack trace) — e não por
+# falta de RAM no host, que tem ~12 GB com ~8,5 GB livres; o teto vinha do
+# container de build. No runner do Actions (16 GB) não há esse limite, daí 6144.
 RUN NODE_OPTIONS=--max-old-space-size=${NODE_HEAP_MB} bun run package
 
 # Backend Rust, do release público do AionCore.
