@@ -23,7 +23,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # git/curl: clone do fonte e download do aioncore.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-         git curl ca-certificates libicu-dev python3 build-essential \
+         git curl ca-certificates libicu-dev python3 build-essential gosu \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g bun
@@ -84,12 +84,29 @@ RUN mkdir -p /opt/aioncore \
 # CLIs de agente disponíveis dentro do container.
 RUN npm install -g @anthropic-ai/claude-code @openai/codex || true
 
+# O AionUi invoca o Claude Code com --dangerously-skip-permissions, e o Claude
+# recusa essa flag como root ("cannot be used with root/sudo privileges for
+# security reasons") — o agente morria na hora com exit code 1. Daí o usuário
+# não-root. Vale como boa prática de qualquer forma: é um agente com shell.
+RUN useradd -m -u 1000 -s /bin/bash aion
+
 # HOME dentro do volume: o `claude` grava credencial em $HOME/.claude e o `codex`
 # em $HOME/.codex. Com o HOME padrão (/root, dentro da camada do container) o
 # login se perderia a cada redeploy — inclusive no build automático diário.
 # Aqui ele cai em /data, que é volume persistente.
 ENV HOME=/data/home
-RUN mkdir -p /data/home
+
+# O /data só existe de verdade em runtime (é volume), e nasce dono do root —
+# por isso o ajuste de permissão e o drop de privilégio ficam no entrypoint,
+# não num `USER` estático.
+RUN printf '%s\n' \
+      '#!/bin/sh' \
+      'set -e' \
+      'mkdir -p /data/home /data/logs' \
+      'chown -R aion:aion /data 2>/dev/null || true' \
+      'exec gosu aion "$@"' \
+    > /usr/local/bin/entrypoint.sh \
+    && chmod +x /usr/local/bin/entrypoint.sh
 
 ENV AIONUI_BACKEND_BIN=/usr/local/bin/aioncore \
     NODE_ENV=production \
@@ -108,4 +125,5 @@ EXPOSE 3000
 
 # --no-build: os assets já foram gerados acima; sem isso o webui.ts recompila
 # a cada boot do container.
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["bunx", "tsx", "scripts/webui.ts", "--remote", "--no-build"]
