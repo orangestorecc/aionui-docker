@@ -1,0 +1,103 @@
+name: build-and-push
+
+# Publica a imagem do AionUi WebUI no GHCR.
+#
+# O build é pesado (~3200 pacotes, bundle de ~10.300 módulos, pico acima de
+# 3 GB de heap) e por isso não roda no servidor da N49, que hospeda produção.
+# Aqui o runner tem 16 GB e o Coolify só faz `docker pull`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      aionui_ref:
+        description: 'Tag do AionUi (vazio = último release)'
+        required: false
+        default: ''
+      aioncore_version:
+        description: 'Tag do AionCore (vazio = último release)'
+        required: false
+        default: ''
+      force:
+        description: 'Rebuildar mesmo se a tag já existir no GHCR'
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths: ['Dockerfile', '.github/workflows/build.yml']
+  schedule:
+    # Diário às 06:00 UTC: pega bump de versão do AionUi sem intervenção.
+    - cron: '0 6 * * *'
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # As duas versões andam juntas: o commit que sobe o AionUi para 2.1.57
+      # sobe o aioncore para v0.1.68. Resolvidas juntas para não dessincronizar.
+      - name: Resolver versões
+        id: ver
+        run: |
+          set -euo pipefail
+          AIONUI="${{ inputs.aionui_ref }}"
+          AIONCORE="${{ inputs.aioncore_version }}"
+
+          if [ -z "$AIONUI" ]; then
+            AIONUI=$(gh api repos/iOfficeAI/AionUi/releases/latest --jq .tag_name)
+          fi
+          if [ -z "$AIONCORE" ]; then
+            AIONCORE=$(gh api repos/iOfficeAI/AionCore/releases/latest --jq .tag_name)
+          fi
+
+          echo "aionui=$AIONUI"     >> "$GITHUB_OUTPUT"
+          echo "aioncore=$AIONCORE" >> "$GITHUB_OUTPUT"
+          echo "tag=${AIONUI#v}"    >> "$GITHUB_OUTPUT"
+          echo "AionUi $AIONUI + AionCore $AIONCORE" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Sem isso o cron diário reconstruiria a mesma versão todo dia.
+      - name: A tag já existe no GHCR?
+        id: exists
+        run: |
+          if [ "${{ inputs.force }}" = "true" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          elif docker manifest inspect "${IMAGE}:${{ steps.ver.outputs.tag }}" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Imagem ${IMAGE}:${{ steps.ver.outputs.tag }} já publicada — nada a fazer." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.exists.outputs.skip != 'true'
+
+      - name: Build e push
+        if: steps.exists.outputs.skip != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.ver.outputs.tag }}
+            ${{ env.IMAGE }}:latest
+          build-args: |
+            AIONUI_REF=${{ steps.ver.outputs.aionui }}
+            AIONCORE_VERSION=${{ steps.ver.outputs.aioncore }}
+            NODE_HEAP_MB=6144
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
