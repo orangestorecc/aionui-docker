@@ -143,6 +143,20 @@ jobs:
           # E que os CLIs de agente funcionam para esse usuario (-u node).
           docker exec -u node smoke claude --version
           docker exec -u node smoke aioncore --version
+
+          # O vigia de posse: simula um login feito pelo terminal do Coolify
+          # (que roda como root) e confirma que a posse e corrigida sozinha,
+          # senao o processo node nao le a credencial e a UI diz "Not logged in".
+          docker exec smoke sh -c 'mkdir -p /data/home/.claude && echo x > /data/home/.claude/.credentials.json && chown -R root:root /data/home/.claude && chmod 600 /data/home/.claude/.credentials.json'
+          for i in $(seq 1 12); do
+            OWNER=$(docker exec smoke stat -c %U /data/home/.claude/.credentials.json)
+            [ "$OWNER" = "node" ] && { echo "vigia corrigiu a posse em ~$((i*5))s"; FIXED=1; break; }
+            sleep 5
+          done
+          [ "${FIXED:-0}" = "1" ] || { echo "::error::posse continuou $OWNER apos 60s"; exit 1; }
+
+          # E que o usuario node de fato consegue ler o arquivo.
+          docker exec -u node smoke cat /data/home/.claude/.credentials.json >/dev/null
           docker logs smoke | tail -20
 
       - name: Push

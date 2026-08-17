@@ -135,11 +135,20 @@ ENV HOME=/data/home
 # O /data só existe de verdade em runtime (é volume), e nasce dono do root —
 # por isso o ajuste de permissão e o drop de privilégio ficam no entrypoint,
 # não num `USER` estático.
+# O vigia existe porque o terminal do Coolify executa como root: um `claude
+# /login` feito por ali grava .credentials.json com dono root e modo 600, que o
+# processo (rodando como node) nao consegue ler — a UI diz "Not logged in".
+# O chown do boot nao cobre isso, porque o login acontece com o container ja de
+# pe. O find so toca no que esta com dono errado, entao o custo e desprezivel.
 RUN printf '%s\n' \
       '#!/bin/sh' \
       'set -e' \
       'mkdir -p /data/home /data/logs' \
       'chown -R node:node /data 2>/dev/null || true' \
+      'while true; do' \
+      '  find /data/home ! -user node -exec chown node:node {} + 2>/dev/null || true' \
+      '  sleep 15' \
+      'done &' \
       'exec gosu node "$@"' \
     > /usr/local/bin/entrypoint.sh \
     && chmod +x /usr/local/bin/entrypoint.sh
