@@ -1,0 +1,3 @@
+# O Dockerfile precisa de LF: com CRLF o shell do container quebra em
+# "$'\r': command not found" nas linhas de RUN.
+* text=auto eol=lf
