@@ -84,6 +84,13 @@ RUN mkdir -p /opt/aioncore \
 # CLIs de agente disponíveis dentro do container.
 RUN npm install -g @anthropic-ai/claude-code @openai/codex || true
 
+# HOME dentro do volume: o `claude` grava credencial em $HOME/.claude e o `codex`
+# em $HOME/.codex. Com o HOME padrão (/root, dentro da camada do container) o
+# login se perderia a cada redeploy — inclusive no build automático diário.
+# Aqui ele cai em /data, que é volume persistente.
+ENV HOME=/data/home
+RUN mkdir -p /data/home
+
 ENV AIONUI_BACKEND_BIN=/usr/local/bin/aioncore \
     NODE_ENV=production \
     AIONUI_PORT=3000 \
