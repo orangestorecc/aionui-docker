@@ -130,15 +130,19 @@ jobs:
             exit 1
           fi
 
-          # Confirma que nao esta root: o Claude Code recusa a flag do AionUi
-          # sob root, que foi a causa do USER_AGENT_DISCONNECTED.
-          WHO=$(docker exec smoke id -un)
-          echo "usuario do processo: $WHO"
-          [ "$WHO" = "node" ] || { echo "::error::rodando como $WHO, esperado node"; exit 1; }
+          # Confirma que o processo que serve nao esta root: o Claude Code recusa
+          # a flag do AionUi sob root, que foi a causa do USER_AGENT_DISCONNECTED.
+          #
+          # Precisa olhar o PID 1, nao `docker exec id -un`: o exec cria um
+          # processo novo com o usuario padrao da imagem (root) e nao herda o
+          # gosu do entrypoint. stat em /proc/1 nao depende de procps.
+          WHO=$(docker exec smoke stat -c %U /proc/1)
+          echo "usuario do PID 1: $WHO"
+          [ "$WHO" = "node" ] || { echo "::error::PID 1 roda como $WHO, esperado node"; exit 1; }
 
-          # E que os CLIs de agente estao acessiveis para esse usuario.
-          docker exec smoke claude --version
-          docker exec smoke aioncore --version
+          # E que os CLIs de agente funcionam para esse usuario (-u node).
+          docker exec -u node smoke claude --version
+          docker exec -u node smoke aioncore --version
           docker logs smoke | tail -20
 
       - name: Push
