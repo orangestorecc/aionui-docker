@@ -1,4 +1,4 @@
-# AionUi WebUI — imagem própria.
+# AionUi WebUI — imagem própria, multi-stage.
 #
 # O Dockerfile oficial do repo (iOfficeAI/AionUi) está abandonado: referencia
 # `bun run build:renderer:web` e `scripts/build-server.mjs`, que não existem mais.
@@ -8,22 +8,18 @@
 # As duas versões andam juntas — o commit que sobe o AionUi para 2.1.57 sobe o
 # aioncore para v0.1.68. Manter os dois ARGs em sincronia ao atualizar.
 
-FROM node:20-slim
+# ---------------------------------------------------------------- builder ----
+FROM node:20-slim AS builder
 
 ARG AIONUI_REF=v2.1.57
-ARG AIONCORE_VERSION=v0.1.68
-ARG AIONCORE_TARGET=x86_64-unknown-linux-gnu
-
 # Heap do V8 para o bundle do renderer. Ver a nota de calibragem no RUN abaixo.
 ARG NODE_HEAP_MB=6144
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# libicu: o officecli (preview de Office) é um binário .NET que aborta sem ICU.
-# git/curl: clone do fonte e download do aioncore.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-         git curl ca-certificates libicu-dev python3 build-essential gosu \
+         git curl ca-certificates python3 build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g bun
@@ -37,7 +33,8 @@ RUN git clone --depth 1 --branch ${AIONUI_REF} https://github.com/iOfficeAI/Aion
 
 # HUSKY=0: o script `prepare` roda husky, que falha fora de um repo com hooks.
 # --ignore-scripts: pula o postinstall, que tentaria baixar o aioncore de um
-# artifact do GitHub Actions (precisa de GH_TOKEN). Buscamos do release abaixo.
+# artifact do GitHub Actions (precisa de GH_TOKEN). Buscamos do release no
+# estágio de runtime.
 #
 # O install baixa ~3200 pacotes; um tarball grande falhando na rede derruba o
 # build inteiro (aconteceu com @sentry/cli-linux-x64, binário opcional que só
@@ -53,21 +50,58 @@ RUN ok=0; \
       bun install --ignore-scripts --omit=optional; \
     fi
 
-# Diagnóstico: registra RAM/CPU no log, para calibrar o heap abaixo.
-# (`free` não existe no node:20-slim — sem procps. /proc/meminfo sempre existe.)
-RUN head -3 /proc/meminfo && echo "nproc=$(nproc)"
-
 # Gera out/renderer (assets estáticos servidos pela WebUI).
 #
 # São ~10.300 módulos num bundle só: com o heap padrão do V8 (~2 GB) o build
-# morre com "Reached heap limit". O NODE_OPTIONS fica escopado neste RUN de
-# propósito — em runtime não queremos reservar heap à toa.
+# morre com "Reached heap limit".
 #
-# Calibragem: 2048 (padrão do V8) estoura com "Reached heap limit". No servidor
-# da N49, 4096 morria com SIGKILL (morte seca, sem stack trace) — e não por
-# falta de RAM no host, que tem ~12 GB com ~8,5 GB livres; o teto vinha do
-# container de build. No runner do Actions (16 GB) não há esse limite, daí 6144.
+# Calibragem: 2048 (padrão do V8) estoura. No servidor da N49, 4096 morria com
+# SIGKILL (morte seca, sem stack trace) — e não por falta de RAM no host, que
+# tem ~12 GB com ~8,5 GB livres; o teto vinha do container de build. No runner
+# do Actions (16 GB) não há esse limite, daí 6144.
 RUN NODE_OPTIONS=--max-old-space-size=${NODE_HEAP_MB} bun run package
+
+# ---------------------------------------------------------------- runtime ----
+# Estágio separado para não carregar as devDependencies (electron, playwright,
+# electron-builder, vitest, jest) nem as toolchains de compilação: em single
+# stage a imagem passava de 1,6 GB, e o pull de 956 MB numa camada só derrubava
+# o deploy por reset de conexão no meio da transferência.
+FROM node:20-slim AS runtime
+
+ARG AIONCORE_VERSION=v0.1.68
+ARG AIONCORE_TARGET=x86_64-unknown-linux-gnu
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# git/curl: os agentes trabalham com repositórios. gosu: drop de privilégio no
+# entrypoint. libicu: o officecli (preview de Office, baixado em runtime pelo
+# backend) é um binário .NET que aborta sem ICU. Preferimos o runtime libicu72
+# ao libicu-dev, que arrastaria headers e libc6-dev de volta.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+         ca-certificates git curl gosu \
+    && (apt-get install -y --no-install-recommends libicu72 \
+        || apt-get install -y --no-install-recommends libicu-dev) \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g bun tsx
+
+WORKDIR /app
+
+# Fontes que o `tsx scripts/webui.ts` precisa em runtime, mais os manifests do
+# workspace (sem packages/ o install de produção não resolve @aionui/web-host).
+COPY --from=builder /app/package.json /app/bun.lock /app/tsconfig.json ./
+COPY --from=builder /app/patches   ./patches
+COPY --from=builder /app/packages  ./packages
+COPY --from=builder /app/scripts   ./scripts
+COPY --from=builder /app/out       ./out
+
+RUN ok=0; \
+    for i in 1 2 3; do \
+      if bun install --production --ignore-scripts; then ok=1; break; fi; \
+      echo ">> tentativa $i falhou"; sleep 10; \
+    done; \
+    [ "$ok" = "1" ]
 
 # Backend Rust, do release público do AionCore.
 RUN mkdir -p /opt/aioncore \
@@ -86,8 +120,9 @@ RUN npm install -g @anthropic-ai/claude-code @openai/codex || true
 
 # O AionUi invoca o Claude Code com --dangerously-skip-permissions, e o Claude
 # recusa essa flag como root ("cannot be used with root/sudo privileges for
-# security reasons") — o agente morria na hora com exit code 1. Daí rodar
-# não-root. Vale como boa prática de qualquer forma: é um agente com shell.
+# security reasons") — o agente morria na hora com exit code 1 e a UI mostrava
+# USER_AGENT_DISCONNECTED. Daí rodar não-root. Vale como boa prática de
+# qualquer forma: é um agente com acesso a shell.
 #
 # Usamos o usuário `node`, que a imagem base já traz no uid 1000 (criar outro
 # ali falha com exit code 4, uid em uso).
@@ -95,7 +130,6 @@ RUN npm install -g @anthropic-ai/claude-code @openai/codex || true
 # HOME dentro do volume: o `claude` grava credencial em $HOME/.claude e o `codex`
 # em $HOME/.codex. Com o HOME padrão (/root, dentro da camada do container) o
 # login se perderia a cada redeploy — inclusive no build automático diário.
-# Aqui ele cai em /data, que é volume persistente.
 ENV HOME=/data/home
 
 # O /data só existe de verdade em runtime (é volume), e nasce dono do root —
@@ -125,7 +159,7 @@ ENV AIONUI_BACKEND_BIN=/usr/local/bin/aioncore \
 VOLUME ["/data"]
 EXPOSE 3000
 
-# --no-build: os assets já foram gerados acima; sem isso o webui.ts recompila
-# a cada boot do container.
+# --no-build: os assets já foram gerados no builder; sem isso o webui.ts
+# tentaria recompilar a cada boot — e no runtime não há toolchain para isso.
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["bunx", "tsx", "scripts/webui.ts", "--remote", "--no-build"]
